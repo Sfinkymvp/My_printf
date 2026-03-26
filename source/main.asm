@@ -13,18 +13,18 @@ _start:
     ; mov     rdx, BUFFER_SIZE
     ; syscall
 
-    mov     rdi, 'H'
-    call    my_printf 
+    mov     rdi, format
+    mov     rsi, char
 
-    mov     rdi, 0x0A
-    call    my_printf
+    call    my_printf 
 
     mov     rax, 60             ; Системный вызов exit
     xor     rdi, rdi            ; Код возврата 0
     syscall
 
 
-section .bss
+section .data
 
 
-input_buffer resb BUFFER_SIZE
+format              db "Hello, %c", 10, 0
+char                db "H"
