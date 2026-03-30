@@ -11,7 +11,9 @@ jump_table:
                     dq my_printf_logic.case_d
                     times ('o' - 'd' - 1) dq my_printf_logic.case_default
                     dq my_printf_logic.case_o
-                    times ('x' - 'o' - 1) dq my_printf_logic.case_default
+                    times ('s' - 'o' - 1) dq my_printf_logic.case_default
+                    dq my_printf_logic.case_s
+                    times ('x' - 's' - 1) dq my_printf_logic.case_default
                     dq my_printf_logic.case_x           
 
 
@@ -132,6 +134,7 @@ my_printf_logic:
     ret
 
 .number_handler:
+    inc     r14
     mov     rdi, [rbx]              
     add     rbx, 8
     mov     rdx, itoa_buffer
@@ -143,25 +146,18 @@ my_printf_logic:
     cmp     rdx, BUFFER_SIZE
     jb      .skip_print
 
-    mov     rdi, buffer
-    mov     rsi, r15
-    call    print_buffer
-    xor     r15d, r15d
+    call    .flush_buffer
 
 .skip_print:
     mov     rcx, rax
     xor     eax, eax
 
-.copy_loop:
+.number_copy_loop:
     movzx   rdx, byte [itoa_buffer + rax]
     mov     byte [buffer + r15], dl
     inc     rax
     inc     r15
-
-.entry_copy_loop:
-    loop    .copy_loop
-
-    inc     r14
+    loop    .number_copy_loop
 
     jmp     .check_buffer
 
@@ -172,6 +168,57 @@ my_printf_logic:
 
     lea     rsi, [jump_table]
     jmp     [rsi + rax * 8]
+
+.string_handler:
+    inc     r14
+    mov     rdi, [rbx]
+    add     rbx, 8
+    call    string_len
+    mov     rcx, rax
+
+    test    rcx, rcx
+    je      .main_loop
+
+    cmp     rcx, BUFFER_SIZE
+    jae     .print_direct
+
+    add     rcx, r15
+    cmp     rcx, BUFFER_SIZE
+    jb      .move_to_buffer
+
+    call    .flush_buffer
+
+.move_to_buffer:
+    mov     rcx, rax
+    xor     eax, eax
+
+.string_copy_loop:
+    movzx   rdx, byte [rdi + rax]
+    mov     byte [r13 + r15], dl
+    inc     rax
+    inc     r15
+    loop    .string_copy_loop
+
+    jmp     .check_buffer
+
+.print_direct:
+    mov     rsi, rcx
+    call    print_buffer
+    jmp     .main_loop
+
+.flush_buffer:
+    push    rdi
+    push    rsi
+
+    mov     rdi, r13
+    mov     rsi, r15
+    call    print_buffer
+    xor     r15d, r15d
+
+    pop     rsi
+    pop     rdi
+
+    ret
 
 .case_b:
     mov     rsi, 2
@@ -194,6 +241,9 @@ my_printf_logic:
 .case_o:
     mov     rsi, 8
     jmp     .number_handler
+
+.case_s:
+    jmp     .string_handler
 
 .case_x:
     mov     rsi, 16                 
@@ -223,6 +273,33 @@ print_buffer:
     mov     rdi, STDOUT_FD
     syscall
 
+    ret
+
+
+; -----------------------------------------------------------------------------
+; Procedure: string_len
+; -----------------------------------------------------------------------------
+; Описание:
+;       Находит длину строки, оканчивающейся ноль-терминатором
+; Входные параметры:
+;       rdi - Указатель на строку
+; Выходные параметры:
+;       rax - Длина строки
+; Портящиеся регистры:
+;       callee-caller
+; -----------------------------------------------------------------------------
+string_len:
+    xor     ecx, ecx
+.counting_loop:
+    movzx   rax, byte [rdi + rcx]
+    test    rax, rax
+    je      .exit
+
+    inc     rcx
+    jmp     .counting_loop
+
+.exit:
+    mov     rax, rcx
     ret
 
 
