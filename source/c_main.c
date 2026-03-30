@@ -13,5 +13,15 @@ int main()
     printf(format_string,
         'm', 0xAB, 012345, -123, 0xabcd0123, "I'm using wsl");
 
+    int value = -1;
+    char* string = "abc\ndef";
+    my_printf("Goodbye\n"
+              "%d %o %x\n"
+              "%s %c\n"
+              "%d %s %x %d%c\n",
+        value, value, value, string, 'T', value, "love", 3802, 100, 33);
+
+    my_printf("Float: %f\n", 0.5);
+
     return 0;
 }
