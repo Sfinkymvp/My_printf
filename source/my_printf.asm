@@ -1,5 +1,6 @@
 BUFFER_SIZE         equ 128
 STDOUT_FD           equ 1
+NUMBER_OF_BITS      equ 32
 
 
 section .rodata
@@ -241,27 +242,60 @@ print_buffer:
 ;       callee-caller
 ; -----------------------------------------------------------------------------
 itoa:
+; 10-я СС обрабатывается отдельно
+    cmp     rsi, 10
+    je      .decimal_logic              
+
+    call    itoa_power2
+    jmp     .exit
+
+.decimal_logic:
+    call    itoa_decimal
+    jmp     .exit
+
+.exit:
+; В регистре rax уже лежит итоговое количество элементов в буфере
+    ret 
+
+
+; -----------------------------------------------------------------------------
+; Procedure: itoa_power2
+; -----------------------------------------------------------------------------
+; Описание:
+;       Осуществляет запись числа в буфер в системе счисления со степенью двойки
+; Входные параметры:
+;       rdi - Число
+;       rsi - Основание системы счисления (2, 8, 16)
+;       rdx - Указатель на буфер
+;       rcx - Количество элементов в буфере
+; Выходные параметры:
+;       rax - Итоговое количество элементов в буфере
+; Портящиеся регистры:
+;       callee-caller
+; -----------------------------------------------------------------------------
+itoa_power2:
 ; --- Start prologue ---
     push    rbp
     mov     rbp, rsp
 
     push    rbx
     push    r12
+    push    r13
+    push    r14
+    push    r15
 ; --- End prologue ---
-    xor     r12d, r12d
 
-    mov     r10, rdi                    ; Сохраняем число
-    mov     r11, rcx                    ; Сохраняем количество элементов в буфере
-
-    cmp     rsi, 10
-    je      .decimal_logic              ; 10-я СС обрабатывается отдельно
-
-    push    rdx                         ; Сохраняем содержимое регистра rdx
+; В регистре r13 хранится указатель на буфер
+    mov     r13, rdx   
+; В регистре r14 хранится количество элементов в буфере
+    mov     r14, rcx
+; В регистре r15 хранится число 
+    mov     r15, rdi
 ; В регистре r8 хранится шаг для битового сдвига. Инструкция 
 ; bsr найдет индекс наибольшего единичного бита в rsi
     bsr     r8, rsi
     xor     edx, edx
-    mov     rax, 64                     ; 64 - количество бит в регистрах r**
+    mov     rax, NUMBER_OF_BITS
 ; В регистре rax хранится количество разрядов числа в заданной 
 ; системе счисления. Делимое лежит в rdx:rax, делитель в r8.
 ; rax = 64 / r8
@@ -275,40 +309,25 @@ itoa:
     inc     rax
 
 .skip_inc:
-    pop     rdx
     mov     rbx, rax
 
     mov     r9, rsi
-    dec     r9                          ; r9 = base - 1 - битовая маска
+; r9 = base - 1 - битовая маска
+    dec     r9                          
 
-    mov     rcx, r11
-    add     rcx, rbx
-    cmp     rcx, BUFFER_SIZE
-; Если в буфере достаточно места для числа, то мы не очищаем его
-    jb      .skip_print
-
-    mov     rdi, rdx 
-    mov     rsi, r11
-    sub     rsp, 8
-    call    print_buffer
-    add     rsp, 8
-    xor     r11d, r11d                  ; Обнуляем количество элементов в буфере
-
-.skip_print:
     mov     rcx, r8
     mov     rax, rbx
-
 .loop_1:
-    mov     rsi, r10
+    mov     rsi, r15
     and     rsi, r9
     push    rsi
-    shr     r10, cl
+    shr     r15, cl
 
     dec     rax
     jne     .loop_1
 
     mov     rcx, rbx
-
+    xor     r12d, r12d
 .loop_2:
     pop     rsi
 
@@ -320,33 +339,102 @@ itoa:
 
 .is_significant:
     movzx   rsi, byte [digits + rsi]
-    mov     byte [rdx + r11], sil
-    inc     r11
+    mov     byte [r13 + r14], sil
+    inc     r14
 ; Если значение r12 не нулевое, значит встречались значащие цифры
     inc     r12
 
 .condition_2:
     loop    .loop_2
 
-    test    r11, r11
-    jne     .done
+    test    r14, r14
+    jne     .exit
 
-    mov     byte [rdx + r11], '0'
-    mov     r11, 1
+    mov     byte [r13 + r14], '0'
+    mov     r14, 1
 
-.done:
-; Возвращаем из функции текущее количество элементов в буфере
-    mov     rax, r11
-
-.decimal_logic:
-; --- Start prologue ---
+.exit:
+    mov     rax, r14
+; --- Start epilogue ---
+    pop     r15
+    pop     r14
+    pop     r13
     pop     r12
     pop     rbx
 
     pop     rbp
-; --- End prologue ---
+; --- End epilogue ---
 
     ret 
+
+
+; -----------------------------------------------------------------------------
+; Procedure: itoa_decimal
+; -----------------------------------------------------------------------------
+; Описание:
+;       Осуществляет запись числа в буфер в десятичной системе счисления
+; Входные параметры:
+;       rdi - Число
+;       rsi - Основание системы счисления (10)
+;       rdx - Указатель на буфер
+;       rcx - Количество элементов в буфере
+; Выходные параметры:
+;       rax - Итоговое количество элементов в буфере
+; Портящиеся регистры:
+;       callee-caller
+; -----------------------------------------------------------------------------
+itoa_decimal:
+; --- Start prologue ---
+    push    rbp
+    mov     rbp, rsp
+
+    push    r13
+    push    r14
+; --- End prologue ---
+
+; В регистре r13 хранится указатель на буфер
+    mov     r13, rdx   
+; В регистре r14 хранится количество элементов в буфере
+    mov     r14, rcx
+
+    mov     eax, edi
+    test    eax, eax
+    jge     .loop_1
+
+    mov     byte [r13 + r14], '-'
+    inc     r14
+    neg     eax
+
+    xor     ecx, ecx
+    mov     esi, 10
+.loop_1:
+    xor     edx, edx
+    div     rsi
+
+    push    rdx
+    inc     rcx
+
+    test    eax, eax
+    jne     .loop_1
+
+.loop_2:
+    pop     rax
+    movzx   rdx, byte [digits + rax]
+    mov     byte [r13 + r14], dl
+    inc     r14
+    loop    .loop_2
+
+    mov     rax, r14
+; --- Start epilogue ---
+    pop     r14
+    pop     r13
+
+    pop     rbp
+; --- End epilogue ---
+
+    ret 
+
+
 
 
 section .note.GNU-stack
