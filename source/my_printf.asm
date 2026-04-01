@@ -12,7 +12,9 @@ NUMBER_OF_XMM_REGS  equ 8               ; Количество xmm регист�
 
 ; Переменная, хранящаа значение счетчика использованных xmm регистров
 ; в функции my_printf_logic
-%define  xmm_counter [rbp - 48] 
+%define xmm_counter [rbp - 48] 
+%define rxx_counter [rbp - 56]
+%define MIN_ASCII_SYMBOL '%'
 
 
 ; ============================================================================= 
@@ -23,6 +25,8 @@ section .rodata
 
 ; Таблица прыжков для обработки спефицикаторов в функции my_printf_logic
 jump_table:
+                    dq my_printf_logic.case_percent
+                    times ('b' - '%' - 1) dq my_printf_logic.case_default
                     dq my_printf_logic.case_b
                     dq my_printf_logic.case_c
                     dq my_printf_logic.case_d
@@ -119,9 +123,10 @@ my_printf:
 ; Описание:
 ;       Логика форматного вывода строки
 ; Входные параметры:
-;       [rbp + 16]-[rbp + 72] - Аргументы, явл. числами с плавающей точкой 
-;       [rbp + 80]            - Форматная строка
-;       [rbp + 80 + 8 * i]    - Данные для i-го целочисленного аргумента
+;       [rbp + 16]-[rbp + 72]  - Аргументы, явл. числами с плавающей точкой 
+;       [rbp + 80]             - Форматная строка
+;       [rbp + 88]-[rbp + 120] - Целочисленные аргументы
+;       [rbp + 128]-...        - Перемешанные аргументы различных типов
 ; Выходные параметры:
 ;       Нет
 ; Портящиеся регистры:
@@ -139,15 +144,17 @@ my_printf_logic:
     push    r15
 ; --- End Prologue --- 
 
-; Выделяем место под переменную xmm_counter и инициализируем её
+; Выделяем место под переменную xmm_counter и инициализируем ее
     sub     rsp, 8
-    mov qword xmm_counter, 0
-; В регистре rbx хранится адрес текущего аргумента
+    mov     qword xmm_counter, 0
+; Выделяем место под переменную rxx_counter и инициализируем ее
+    sub     rsp, 8
+    mov     qword rxx_counter, 0
+; В регистре rbx хранится адрес текущего аргумента (Изначально rbp + 128)
     mov     rbx, rbp        
-    add     rbx, 80
+    add     rbx, 128
 ; В регистре r12 хранится адрес форматной строки
-    mov     r12, [rbx]             
-    add     rbx, 8
+    mov     r12, [rbp + 80]             
 ; В регистре r13 хранится адрес буфера
     mov     r13, buffer          
 ; В регистре r14 хранится смещение в форматной строке
@@ -158,7 +165,7 @@ my_printf_logic:
 .main_loop:
     movzx   rax, byte [r12 + r14]
     test    rax, rax
-    je     .done
+    je      .done
 
     cmp     byte [r12 + r14], '%'
     je      .spec_handler
@@ -185,7 +192,7 @@ my_printf_logic:
     call    .flush_buffer
 
 ; Очищаем место, занятое локальными переменными
-    add     rsp, 8
+    add     rsp, 16
 ; --- Start Epilogue --- 
     pop     r15
     pop     r14
@@ -215,44 +222,29 @@ my_printf_logic:
     inc     r14                      
     movzx   rax, byte [r12 + r14]
     lea     rsi, [jump_table]
-    jmp     [rsi + (rax - 'b') * 8]
+    jmp     [rsi + (rax - MIN_ASCII_SYMBOL) * 8]
 ; .............................................................................
 
 
 ; .............................................................................
-; Logic Block .number_handler
+; Logic Block .char_handler
 ; .............................................................................
 ; Описание:
-;       Подготавливает число к выводу через itoa и копирует в основной буфер
+;       Копирует символ в основной буфер
 ; Начальное состояние:
 ;       r12+r14 - Текущая позиция в форматной строке 
-;       rbx     - Адрес аргумента в стеке
 ;       rsi     - Основание системы счисления
 ; Портящиеся регистры:
 ;       caller-saved регистры
 ; Следующий шаг:
 ;       jmp .check_buffer
 ; .............................................................................
-.number_handler:
+.char_handler:
     inc     r14
-    mov     rdi, [rbx]              
-    add     rbx, 8
-    mov     rdx, ascii_buffer
-    xor     ecx, ecx
-    call    itoa
-
-    mov     rdx, rax
-    add     rdx, r15
-    cmp     rdx, BUFFER_SIZE
-    jb      .skip_flush
-
-    call    .flush_buffer
-
-.skip_flush:
-    mov     rsi, ascii_buffer
-    mov     rcx, rax
-
-    call    .copy_to_buffer
+    call    .get_rxx_data
+; В регистре rdi находится символ
+    mov     byte [r13 + r15], dil 
+    inc     r15
     jmp     .check_buffer
 ; .............................................................................
 
@@ -271,13 +263,11 @@ my_printf_logic:
 ;       jmp .check_buffer
 ; .............................................................................
 .string_handler:
-; Получение адреса строки
     inc     r14
-    mov     rdi, [rbx]
-    add     rbx, 8
-
-    call    string_len                  ; Нахождение длины строки
-
+    call    .get_rxx_data
+; В регистре rdi находится адрес строки
+; Находим длину строки
+    call    string_len      
 ; Если строка состоит только из ноль-терминатора, то ее печать пропускается
     mov     rcx, rax
     test    rcx, rcx
@@ -308,6 +298,43 @@ my_printf_logic:
 
 
 ; .............................................................................
+; Logic Block .number_handler
+; .............................................................................
+; Описание:
+;       Подготавливает число к выводу через itoa и копирует в основной буфер
+; Начальное состояние:
+;       r12+r14 - Текущая позиция в форматной строке 
+;       rsi     - Основание системы счисления
+; Портящиеся регистры:
+;       caller-saved регистры
+; Следующий шаг:
+;       jmp .check_buffer
+; .............................................................................
+.number_handler:
+    inc     r14
+    call    .get_rxx_data
+; В регистре rdi находится число
+    mov     rdx, ascii_buffer
+    xor     ecx, ecx
+    call    itoa
+
+    mov     rdx, rax
+    add     rdx, r15
+    cmp     rdx, BUFFER_SIZE
+    jb      .skip_flush
+
+    call    .flush_buffer
+
+.skip_flush:
+    mov     rsi, ascii_buffer
+    mov     rcx, rax
+
+    call    .copy_to_buffer
+    jmp     .check_buffer
+; .............................................................................
+
+
+; .............................................................................
 ; Logic Block .float_handler
 ; .............................................................................
 ; Описание:
@@ -322,20 +349,7 @@ my_printf_logic:
 ; .............................................................................
 .float_handler:
     inc     r14
-    mov     rax, qword xmm_counter
-    cmp     rax, 8
-    jae     .alternative_take
-
-    mov     rdi, [rbp + 16 + 8 * rax]
-    inc     qword xmm_counter
-    jmp     .float_processing
-
-.alternative_take:
-    mov     rdi, [rbx]
-    add     rbx, 8
-    jmp     .float_processing
-
-.float_processing:
+    call    .get_xmm_data
 ; В регистре rdi находится число с плавающей точкой
     mov     rsi, ascii_buffer
     mov     rdx, 0
@@ -347,6 +361,71 @@ my_printf_logic:
 
     jmp     .check_buffer    
 ; .............................................................................
+
+
+; -----------------------------------------------------------------------------
+; Local Procedure: .get_rxx_data
+; -----------------------------------------------------------------------------
+; Описание:
+;       Возвращает целочисленный аргумент
+; Используемые данные:
+;       rxx_counter - Номер текущего целочисленного аргумента
+;       rbx         - Указатель на область смешанных аргументов
+; Выходные параметры:
+;       rdi         - Полученный целочисленный аргумент
+; Портящиеся регистры:
+;       rax
+; -----------------------------------------------------------------------------
+.get_rxx_data:
+    mov     rax, qword rxx_counter
+    cmp     rax, 5
+    jae     .alternative_int_data_take
+
+    mov     rdi, [rbp + 88 + 8 * rax]
+    inc     qword rxx_counter
+    jmp     .exit_get_rxx_data
+
+.alternative_int_data_take:
+    mov     rdi, [rbx]
+    add     rbx, 8
+    jmp     .exit_get_rxx_data
+
+.exit_get_rxx_data:
+    ret
+; -----------------------------------------------------------------------------
+
+
+; -----------------------------------------------------------------------------
+; Local Procedure: .get_xmm_data
+; -----------------------------------------------------------------------------
+; Описание:
+;       Возвращает аргумент вещественного типа данных
+;       (В целочисленном регистре)
+; Используемые данные:
+;       xmm_counter - Номер текущего вещественного аргумента
+;       rbx         - Указатель на область смешанных аргументов
+; Выходные параметры:
+;       rdi         - Полученный вещественный аргумент
+; Портящиеся регистры:
+;       rax
+; -----------------------------------------------------------------------------
+.get_xmm_data:
+    mov     rax, qword xmm_counter
+    cmp     rax, 8
+    jae     .alternative_float_data_take
+
+    mov     rdi, [rbp + 16 + 8 * rax]
+    inc     qword xmm_counter
+    jmp     .exit_get_xmm_data
+
+.alternative_float_data_take:
+    mov     rdi, [rbx]
+    add     rbx, 8
+    jmp     .exit_get_xmm_data
+
+.exit_get_xmm_data:
+    ret
+; -----------------------------------------------------------------------------
 
 
 ; -----------------------------------------------------------------------------
@@ -418,19 +497,18 @@ my_printf_logic:
 ; -----------------------------------------------------------------------------
 
 
+.case_percent:
+    inc     r14
+    mov     byte [r13 + r15], '%'
+    inc     r15
+    jmp     .check_buffer
+
 .case_b:
     mov     rsi, 2
     jmp     .number_handler
 
 .case_c:
-    movzx   rax, byte [rbx]             ; Получаем символ
-    add     rbx, 8
-
-    mov     byte [r13 + r15], al        ; Кладем в буфер символ
-    inc     r14
-    inc     r15
-
-    jmp     .check_buffer
+    jmp     .char_handler
 
 .case_d:
     mov     rsi, 10
@@ -451,6 +529,8 @@ my_printf_logic:
     jmp     .number_handler
 
 .case_default:
+; Случай является заглушкой, и прыжок на него никогда не ожидается
+; при корректном использовании спецификаторов
     nop
 ; =============================================================================
 
@@ -785,10 +865,11 @@ ftoa:
 
     cmp     rdi, -1023
     jne     .skip_denormalized_case
-; Добавляем единицу для денормализованного числа
+; Добавляем единицу для экспоненты денормализованного числа
+; Экспонента денормализованного числа равна -1022
     inc     rdi
-    mov     rcx, 0x0010000000000000
 ; Обнуляем ведущую единицу у денормализованного числа
+    mov     rcx, 0x0010000000000000
     xor     rsi, rcx
 
 .skip_denormalized_case:
@@ -800,31 +881,94 @@ ftoa:
     sub     rdx, rdi
 
 ; Если экспонента слишком большая, то обрабатываем число в научной записи
-    cmp     rdi, 60
-    ; jg      .scientific_handler
+    ; cmp     rdi, 31
 ; Если экспонента слишком маленькая, то обрабатываем число в научной записи
-    cmp     rdi, -4
-    ; jl      .scientific_handler
+    ; cmp     rdi, -14
+
 ; Если экспонента меньше нуля, то число < 1, а значит нет необходимости
 ; обрабатывать его целую часть
-    cmp     rdi, 0 
-    jl      .small_number
+    test    rdi, rdi
+    jl      .number_handler_small
 
+    jmp     .number_handler_default
+
+
+.done:
+    mov     rax, r14
+; --- Start Epilogue ---
+    pop    r15
+    pop    r14
+    pop    r13
+    pop    rbx
+
+    pop     rbp
+; --- End Epilogue ---
+    ret
+
+
+; .............................................................................
+; Logic Block .number_handler_small
+; .............................................................................
+; Описание:
+;       Размещает в буфере малое число с показателем меньше нуля
+; Начальное состояние:
+;       r13+r14 - Текущая позиция в форматной строке 
+;       rdi     - Степень числа
+; Портящиеся регистры:
+;       rcx, rsi, rdi
+; Следующий шаг:
+;       jmp .fraction_handler
+; .............................................................................
+.number_handler_small:
+; Если -5 < exp < 0, то дробная часть = rsi >> (-exp - 1), но а целая часть уже = 0,
+; поэтому ставим ноль и точку в числе
+    mov     byte [r13 + r14], '0'
+    inc     r14
+    mov     byte [r13 + r14], '.'
+    inc     r14
+
+    neg     rdi
+    dec     rdi
+    mov     rcx, rdi
+; В регистре rsi будет хранится дробная часть числа
+    shr     rsi, cl
+    mov     rdi, rbx
+    call     .fraction_handler
+
+    jmp     .done
+; .............................................................................
+
+
+; .............................................................................
+; Logic Block .number_handler_default
+; .............................................................................
+; Описание:
+;       Размещает в буфере малое число с неотрицательным показателем
+; Начальное состояние:
+;       r13+r14 - Текущая позиция в форматной строке 
+;       rdi     - Степень числа
+; Портящиеся регистры:
+;       caller-saved
+; Следующий шаг:
+;       jmp .fraction_handler
+; .............................................................................
+.number_handler_default:
 ; Сохраняем экспоненту и мантиссу
     push    rdi
     push    rsi
 
 ; В регистре rcx будет находиться сдвиг (63 - exp)
 ; Так как 0 <= exp < 60, то (63 - exp) > 0
+; В регистре rdi будет находиться целая часть числа
     mov     rcx, 63
     sub     rcx, rdi
     mov     rdi, rsi
-; В регистре rdi будет находиться целая часть числа
     shr     rdi, cl
+
+; Кладем в буфер целую часть числа
     mov     rsi, 10
     mov     rdx, r13
     mov     rcx, r14
-; Кладем в буфер целую часть числа
     call    itoa
     mov     r14, rax
 
@@ -841,23 +985,53 @@ ftoa:
     inc     rcx
 ; В регистре rsi будет находиться дробная часть числа
     shl     rsi, cl
-    jmp     .fraction_loop
+    mov     rdi, rbx
+    call    .fraction_handler
 
-.small_number:
-; Если -5 < exp < 0, то дробная часть = rsi >> (-exp), но а целая часть уже = 0,
-; поэтому ставим ноль и точку в числе
-    mov     byte [r13 + r14], '0'
-    inc     r14
-    mov     byte [r13 + r14], '.'
-    inc     r14
+    jmp     .done
+; .............................................................................
 
-    neg     rdx
-    mov     rcx, rdx
-; В регистре rsi будет хранится дробная часть числа
-    shr     rsi, cl
-    jmp     .fraction_loop
 
-.fraction_loop:
+; -----------------------------------------------------------------------------
+; Local Procedure: .get_decimal_power
+; -----------------------------------------------------------------------------
+; Описание:
+;       Конвертирует степень числа 2 в степень числа 10
+; Входные параметры:
+;       rdi - Степень числа 2
+; Используемые данные:
+;       rdi - Возвращает в регистре степень числа 10
+; Портящиеся регистры:
+;       rax, rcx, rdx
+; -----------------------------------------------------------------------------
+.get_decimal_power:
+    xor     edx, edx
+    mov     rax, rdi 
+    mov     rcx, 19728
+    mul     rcx
+    mov     rcx, 16
+    shr     rax, cl
+
+    mov     rdi, rax
+    ret
+; -----------------------------------------------------------------------------
+
+
+; -----------------------------------------------------------------------------
+; Local Procedure: .fraction_handler
+; -----------------------------------------------------------------------------
+; Описание:
+;       Размещает в буфере первые n разрядов числа после запятой
+; Входные параметры:
+;       rsi - Cодержит мантиссу числа, выровненную по левой границе
+;       rdi - Число n разрядов для размещенияk
+; Используемые данные:
+;       r13 - Адрес буфера
+;       r14 - Текущее смещение
+; Портящиеся регистры:
+;       rax, rcx, rsi, rdi
+; -----------------------------------------------------------------------------
+.fraction_handler:
     xor     edx, edx
     mov     rax, rsi
     mov     rcx, 10
@@ -868,41 +1042,11 @@ ftoa:
     inc     r14
 
     mov     rsi, rax
-    dec     rbx
-    jne     .fraction_loop
+    dec     rdi
+    jne     .fraction_handler
 
-.done:
-
-    mov     rax, r14
-; --- Start Epilogue ---
-    pop    r15
-    pop    r14
-    pop    r13
-    pop    rbx
-
-    pop     rbp
-; --- End Epilogue ---
     ret
-
-.handle_exceptions:
-    mov     rdi, r15
-    mov     rcx, 0x000FFFFFFFFFFFFF
-    and     rdi, rcx
-    test    rdi, rdi
-    je      .handle_inf
-    jmp     .handle_nan
-
-.handle_inf:
-    mov     rsi, inf_string 
-    mov     rcx, inf_string_len
-    call    .copy_to_buffer
-    jmp     .done
-
-.handle_nan:
-    mov     rsi, nan_string
-    mov     rcx, nan_string_len
-    call    .copy_to_buffer
-    jmp     .done
+; -----------------------------------------------------------------------------
 
 
 ; -----------------------------------------------------------------------------
@@ -917,7 +1061,7 @@ ftoa:
 ;       r13 - Адрес буфера
 ;       r14 - Текущее смещение
 ; Портящиеся регистры:
-;       caller-saved регистры
+;       rcx, rdx, rsi
 ; -----------------------------------------------------------------------------
 .copy_to_buffer:
     test    rcx, rcx    
@@ -933,6 +1077,29 @@ ftoa:
 .copy_done:
     ret
 ; -----------------------------------------------------------------------------
+
+
+.handle_exceptions:
+    mov     rdi, r15
+    mov     rcx, 0x000FFFFFFFFFFFFF
+    and     rdi, rcx
+    test    rdi, rdi
+    je      .handle_inf
+    jmp     .handle_nan
+
+
+.handle_inf:
+    mov     rsi, inf_string 
+    mov     rcx, inf_string_len
+    call    .copy_to_buffer
+    jmp     .done
+
+
+.handle_nan:
+    mov     rsi, nan_string
+    mov     rcx, nan_string_len
+    call    .copy_to_buffer
+    jmp     .done
 
 
 ; =============================================================================
