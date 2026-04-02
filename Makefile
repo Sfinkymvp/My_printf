@@ -5,10 +5,10 @@ C_CASE_FILES = $(OBJ_DIR)/my_printf.o $(OBJ_DIR)/c_main.o
 ASM_CASE_FILES = $(OBJ_DIR)/my_printf.o $(OBJ_DIR)/asm_main.o
 
 c_case: $(C_CASE_FILES)
-	@gcc -no-pie $(C_CASE_FILES) -o program_c.out
+	@gcc -fPIE $(C_CASE_FILES) -o program_c.out
 
 asm_case: $(ASM_CASE_FILES)
-	@gcc -no-pie $(ASM_CASE_FILES) -o program_asm.out
+	@gcc -fPIE $(ASM_CASE_FILES) -o program_asm.out
 
 $(OBJ_DIR)/asm_main.o:
 	@mkdir -p obj
@@ -16,7 +16,7 @@ $(OBJ_DIR)/asm_main.o:
 
 $(OBJ_DIR)/c_main.o:
 	@mkdir -p obj
-	@gcc -c $(SRC_DIR)/c_main.c -o $(OBJ_DIR)/c_main.o
+	@gcc -fPIE -c $(SRC_DIR)/c_main.c -o $(OBJ_DIR)/c_main.o
 
 $(OBJ_DIR)/my_printf.o:
 	@mkdir -p obj

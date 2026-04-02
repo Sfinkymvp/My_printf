@@ -3,24 +3,30 @@
 ; ============================================================================= 
 
 
-BUFFER_SIZE         equ 128             ; Ограничение на размер буфера
+; Ограничение на размер буфера
+BUFFER_SIZE         equ 128          
 ; Файловый дескриптор стандартного потока вывода
 STDOUT_FD           equ 1  
-NUMBER_OF_BITS      equ 32              ; Количество бит в целом числе (int)
-NUMBER_OF_XMM_REGS  equ 8               ; Количество xmm регистров
+; Количество бит в целом числе (int)
+NUMBER_OF_BITS      equ 32              
+; Количество xmm регистров
+NUMBER_OF_XMM_REGS  equ 8               
 
 
-; Переменная, хранящаа значение счетчика использованных xmm регистров
-; в функции my_printf_logic
+; Переменная, хранящая счетчик пройденных аргументов из
+; регистров rxx в функции my_printf_logic
 %define xmm_counter [rbp - 48] 
+; Переменная, хранящая счетчик пройденных аргументов из 
+; регистров xmm в функции my_printf_logic
 %define rxx_counter [rbp - 56]
+; Минимальный по значению ascii-символ, используемый в таблице прыжков
 %define MIN_ASCII_SYMBOL '%'
 
 
 ; ============================================================================= 
-; RODATA SECTION
+; DATA SECTION
 ; ============================================================================= 
-section .rodata
+section .data
 
 
 ; Таблица прыжков для обработки спефицикаторов в функции my_printf_logic
@@ -38,6 +44,13 @@ jump_table:
                     dq my_printf_logic.case_s
                     times ('x' - 's' - 1) dq my_printf_logic.case_default
                     dq my_printf_logic.case_x           
+
+
+; ============================================================================= 
+; RODATA SECTION
+; ============================================================================= 
+section .rodata
+
 
 ; Символы для перевода числовых значений в строковый формат
 digits              db "0123456789ABCDEF"
@@ -65,6 +78,7 @@ ascii_buffer        resb BUFFER_SIZE
 ; TEXT SECTION
 ; ============================================================================= 
 section .text
+    extern printf
     global my_printf
 
 
@@ -81,16 +95,18 @@ section .text
 ;       r8            - 4 аргумент
 ;       r9            - 5 аргумент 
 ;       xmm0-xmm7     - Аргументы, являющиеся числами с плавающей точкой
-;       [rsp + 8 * i] - (i + 6) аргумент
+;       [rsp + 8 * i] - Область смешанных аргументов
 ; Выходные параметры:
 ;       Нет
 ; Портящиеся регистры:
-;       Все регистры
+;       caller-saved
 ; ============================================================================= 
 my_printf:
-    pop r15                             ; Сохранение адреса возврата
-
-; Реализация изменения типа вызова функции
+; Сохранение адреса возврата
+    pop     r11
+; Сохранение количества используемых регистров xmm в al
+    push    rax
+; Сохраняем содержимое регистров типа вызова System V ABI
     push    r9                         
     push    r8                         
     push    rcx                        
@@ -98,7 +114,7 @@ my_printf:
     push    rsi                        
     push    rdi                        
            
- ; Кладем в стек значения XMM регистров
+; Кладем в стек значения XMM регистров
     sub     rsp, 64
     movq    [rsp + 56], xmm7
     movq    [rsp + 48], xmm6
@@ -110,10 +126,21 @@ my_printf:
     movq    [rsp],      xmm0
 
     call    my_printf_logic
-    add     rsp, 8 * 6 + 8 * 8
+    add     rsp, 64
 
-    push    r15                         ; Восстановление адрес возврата
-    ret
+; Возвращаем содержимое регистров 
+    pop     rdi
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    pop     r8
+    pop     r9
+; Восстанавливаем содержимое регистра rax
+    pop     rax
+; Восстановление адреса возврата
+    push    r11 
+
+    jmp     printf wrt ..plt
 ; ============================================================================= 
 
 
@@ -126,11 +153,12 @@ my_printf:
 ;       [rbp + 16]-[rbp + 72]  - Аргументы, явл. числами с плавающей точкой 
 ;       [rbp + 80]             - Форматная строка
 ;       [rbp + 88]-[rbp + 120] - Целочисленные аргументы
-;       [rbp + 128]-...        - Перемешанные аргументы различных типов
+;       [rbp + 128]            - Сохраненный rax
+;       [rbp + 136]-...        - Перемешанные аргументы различных типов
 ; Выходные параметры:
 ;       Нет
 ; Портящиеся регистры:
-;       callee-saved регистры
+;       callee-saved регистры, rax, r11
 ; =============================================================================
 my_printf_logic:
 ; --- Start Prologue ---
@@ -138,6 +166,7 @@ my_printf_logic:
     mov     rbp, rsp
 
     push    rbx
+    push    r11
     push    r12
     push    r13
     push    r14
@@ -152,11 +181,11 @@ my_printf_logic:
     mov     qword rxx_counter, 0
 ; В регистре rbx хранится адрес текущего аргумента (Изначально rbp + 128)
     mov     rbx, rbp        
-    add     rbx, 128
+    add     rbx, 136
 ; В регистре r12 хранится адрес форматной строки
     mov     r12, [rbp + 80]             
 ; В регистре r13 хранится адрес буфера
-    mov     r13, buffer          
+    lea     r13, [rel buffer]
 ; В регистре r14 хранится смещение в форматной строке
     xor     r14d, r14d                  
 ; В регистре r15 хранится размер содержимого буфера
@@ -187,7 +216,6 @@ my_printf_logic:
     jmp     .main_loop
 
 .done:
-
 ; Необходимо очистить буфер от оставшихся символов
     call    .flush_buffer
 
@@ -198,6 +226,7 @@ my_printf_logic:
     pop     r14
     pop     r13
     pop     r12
+    pop     r11
     pop     rbx
 
     pop     rbp
@@ -221,7 +250,7 @@ my_printf_logic:
 ; Обработка спецификатора в форматной строке
     inc     r14                      
     movzx   rax, byte [r12 + r14]
-    lea     rsi, [jump_table]
+    lea     rsi, [rel jump_table]
     jmp     [rsi + (rax - MIN_ASCII_SYMBOL) * 8]
 ; .............................................................................
 
@@ -314,7 +343,7 @@ my_printf_logic:
     inc     r14
     call    .get_rxx_data
 ; В регистре rdi находится число
-    mov     rdx, ascii_buffer
+    lea     rdx, [rel ascii_buffer]
     xor     ecx, ecx
     call    itoa
 
@@ -326,7 +355,7 @@ my_printf_logic:
     call    .flush_buffer
 
 .skip_flush:
-    mov     rsi, ascii_buffer
+    lea     rsi, [rel ascii_buffer]
     mov     rcx, rax
 
     call    .copy_to_buffer
@@ -351,11 +380,11 @@ my_printf_logic:
     inc     r14
     call    .get_xmm_data
 ; В регистре rdi находится число с плавающей точкой
-    mov     rsi, ascii_buffer
+    lea     rsi, [rel ascii_buffer]
     mov     rdx, 0
     call    ftoa
 
-    mov     rsi, ascii_buffer
+    lea     rsi, [rel ascii_buffer]
     mov     rcx, rax
     call    .copy_to_buffer
 
@@ -700,7 +729,8 @@ itoa_power2:
     je      .condition_2
 
 .is_significant:
-    movzx   rsi, byte [digits + rsi]
+    lea     rax, [rel digits]
+    movzx   rsi, byte [rax + rsi]
     mov     byte [r13 + r14], sil
     inc     r14
 ; Если значение r12 не нулевое, значит встречались значащие цифры
@@ -782,7 +812,8 @@ itoa_decimal:
 
 .loop_2:
     pop     rax
-    movzx   rdx, byte [digits + rax]
+    lea     r8, [rel digits]
+    movzx   rdx, byte [r8 + rax]
     mov     byte [r13 + r14], dl
     inc     r14
     loop    .loop_2
@@ -1029,7 +1060,7 @@ ftoa:
 ;       r13 - Адрес буфера
 ;       r14 - Текущее смещение
 ; Портящиеся регистры:
-;       rax, rcx, rsi, rdi
+;       rax, rcx, rdx, rsi, rdi
 ; -----------------------------------------------------------------------------
 .fraction_handler:
     xor     edx, edx
@@ -1037,7 +1068,8 @@ ftoa:
     mov     rcx, 10
     mul     rcx
 
-    movzx   rcx, byte [digits + rdx]
+    lea     rcx, [rel digits]
+    movzx   rcx, byte [rcx + rdx]
     mov     byte [r13 + r14], cl
     inc     r14
 
@@ -1089,19 +1121,17 @@ ftoa:
 
 
 .handle_inf:
-    mov     rsi, inf_string 
+    lea     rsi, [rel inf_string]
     mov     rcx, inf_string_len
     call    .copy_to_buffer
     jmp     .done
 
 
 .handle_nan:
-    mov     rsi, nan_string
+    lea     rsi, [rel nan_string]
     mov     rcx, nan_string_len
     call    .copy_to_buffer
     jmp     .done
-
-
 ; =============================================================================
 
 
