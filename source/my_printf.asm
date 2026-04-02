@@ -9,9 +9,50 @@ BUFFER_SIZE         equ 128
 STDOUT_FD           equ 1  
 ; Количество бит в целом числе (int)
 NUMBER_OF_BITS      equ 32              
-; Количество xmm регистров
-NUMBER_OF_XMM_REGS  equ 8               
+; Количество байт, выделенных под регистры xmm в стеке
+XMM_STORAGE_SIZE    equ 64
 
+; Смещение регистра rdi относительно rbp в функции my_printf_logic
+RDI_OFFSET          equ 80
+; Смещение регистра rsi относительно rbp в функции my_printf_logic
+RSI_OFFSET          equ 88
+; Смещение начала области стековых аргументов относительно rbp
+; в функции my_printf_logic
+STACK_ARG_START     equ 136
+; Смещение начала области вещественных аргументов относительно rbp
+; в функции my_printf_logic
+XMM_ARG_START       equ 16
+
+; Количество регистров общего назначения, используемых для передачи
+; аргументов в функцию без учета форматной строки
+GRP_REG_COUNT       equ 5
+; Количество вещественных регистров, используемых для передачи
+; аргументов в функции
+XMM_REG_COUNT       equ 8
+
+; Основание двоичной СС
+BIN_BASE            equ 2
+; Основание восьмеричной СС
+OCT_BASE            equ 8
+; Основание десятичной СС
+DECIMAL_BASE        equ 10
+; Основание шестнадцатиричной СС
+HEX_BASE            equ 16
+
+; Количество знаков после запятой у вещественного числа
+DEFAULT_PRECISION   equ 6
+
+; Битовая маска для бита знака у числа double
+DOUBLE_SIGN_MASK    equ 0x8000000000000000
+; Битовая маска показателя у числа double
+DOUBLE_EXP_MASK     equ 0x7FF0000000000000
+; Смещение показателя у числа double
+DOUBLE_EXP_BIAS     equ 1023
+; Смещение для нахождения целой части 
+DOUBLE_EXP_SHIFT    equ 52
+
+DOUBLE_MANT_MASK    equ 0x000FFFFFFFFFFFFF
+DOUBLE_MANT_IMAGINARY_1_MASK equ 0x0010000000000000
 
 ; Переменная, хранящая счетчик пройденных аргументов из
 ; регистров rxx в функции my_printf_logic
@@ -115,7 +156,7 @@ my_printf:
     push    rdi                        
            
 ; Кладем в стек значения XMM регистров
-    sub     rsp, 64
+    sub     rsp, XMM_STORAGE_SIZE
     movq    [rsp + 56], xmm7
     movq    [rsp + 48], xmm6
     movq    [rsp + 40], xmm5
@@ -126,7 +167,7 @@ my_printf:
     movq    [rsp],      xmm0
 
     call    my_printf_logic
-    add     rsp, 64
+    add     rsp, XMM_STORAGE_SIZE
 
 ; Возвращаем содержимое регистров 
     pop     rdi
@@ -179,11 +220,11 @@ my_printf_logic:
 ; Выделяем место под переменную rxx_counter и инициализируем ее
     sub     rsp, 8
     mov     qword rxx_counter, 0
-; В регистре rbx хранится адрес текущего аргумента (Изначально rbp + 128)
+; В регистре rbx хранится адрес текущего аргумента (Изначально rbp + 136)
     mov     rbx, rbp        
-    add     rbx, 136
+    add     rbx, STACK_ARG_START
 ; В регистре r12 хранится адрес форматной строки
-    mov     r12, [rbp + 80]             
+    mov     r12, [rbp + RDI_OFFSET]             
 ; В регистре r13 хранится адрес буфера
     lea     r13, [rel buffer]
 ; В регистре r14 хранится смещение в форматной строке
@@ -381,7 +422,7 @@ my_printf_logic:
     call    .get_xmm_data
 ; В регистре rdi находится число с плавающей точкой
     lea     rsi, [rel ascii_buffer]
-    mov     rdx, 0
+    xor     edx, edx
     call    ftoa
 
     lea     rsi, [rel ascii_buffer]
@@ -407,10 +448,10 @@ my_printf_logic:
 ; -----------------------------------------------------------------------------
 .get_rxx_data:
     mov     rax, qword rxx_counter
-    cmp     rax, 5
+    cmp     rax, GRP_REG_COUNT
     jae     .alternative_int_data_take
 
-    mov     rdi, [rbp + 88 + 8 * rax]
+    mov     rdi, [rbp + RSI_OFFSET + 8 * rax]
     inc     qword rxx_counter
     jmp     .exit_get_rxx_data
 
@@ -440,10 +481,10 @@ my_printf_logic:
 ; -----------------------------------------------------------------------------
 .get_xmm_data:
     mov     rax, qword xmm_counter
-    cmp     rax, 8
+    cmp     rax, XMM_REG_COUNT
     jae     .alternative_float_data_take
 
-    mov     rdi, [rbp + 16 + 8 * rax]
+    mov     rdi, [rbp + XMM_ARG_START + 8 * rax]
     inc     qword xmm_counter
     jmp     .exit_get_xmm_data
 
@@ -533,28 +574,28 @@ my_printf_logic:
     jmp     .check_buffer
 
 .case_b:
-    mov     rsi, 2
+    mov     rsi, BIN_BASE
     jmp     .number_handler
 
 .case_c:
     jmp     .char_handler
 
 .case_d:
-    mov     rsi, 10
+    mov     rsi, DECIMAL_BASE
     jmp     .number_handler
 
 .case_f:
     jmp     .float_handler
 
 .case_o:
-    mov     rsi, 8
+    mov     rsi, OCT_BASE
     jmp     .number_handler
 
 .case_s:
     jmp     .string_handler
 
 .case_x:
-    mov     rsi, 16                 
+    mov     rsi, HEX_BASE
     jmp     .number_handler
 
 .case_default:
@@ -633,7 +674,7 @@ string_len:
 ; =============================================================================
 itoa:
 ; 10-я СС обрабатывается отдельно
-    cmp     rsi, 10
+    cmp     rsi, DECIMAL_BASE
     je      .decimal_logic              
 
     call    itoa_power2
@@ -689,8 +730,8 @@ itoa_power2:
     mov     rax, NUMBER_OF_BITS
 ; В регистре rax хранится количество разрядов числа в заданной 
 ; системе счисления. Делимое лежит в rdx:rax, делитель в r8.
-; rax = 64 / r8
-; rdx = 64 % r8
+; rax = 32 / r8
+; rdx = 32 % r8
     div     r8
 
     test    rdx, rdx
@@ -799,7 +840,7 @@ itoa_decimal:
 
 .skip_sign_case:
     xor     ecx, ecx
-    mov     esi, 10
+    mov     esi, DECIMAL_BASE
 .loop_1:
     xor     edx, edx
     div     rsi
@@ -856,7 +897,7 @@ ftoa:
 
 ; В регистре rbx хранится точность вывода числа
 ; Под точностью подразумевается количество выводимых цифр после запятой
-    mov     rbx, 6
+    mov     rbx, DEFAULT_PRECISION
 ; В регистре r13 хранится указатель на буфер
     mov     r13, rsi
 ; В регистре r14 хранится количество элементов в буфере
@@ -864,7 +905,7 @@ ftoa:
 ; В регистре r15 хранится число
     mov     r15, rdi
 
-    mov     rcx, 0x8000000000000000
+    mov     rcx, DOUBLE_SIGN_MASK
     and     rdi, rcx
     test    rdi, rdi
     je      .skip_sign_printing
@@ -875,23 +916,23 @@ ftoa:
 .skip_sign_printing:
 ; Извлекаем экспоненту
     mov     rdi, r15
-    mov     rcx, 0x7FF0000000000000
+    mov     rcx, DOUBLE_EXP_MASK
     and     rdi, rcx
-    shr     rdi, 52
+    shr     rdi, DOUBLE_EXP_SHIFT
 
 ; Проверяем исключения (inf/NaN)
     cmp     rdi, 0x7FF
     je      .handle_exceptions
 
 ; Сдвигаем степень двойки
-    sub     rdi, 1023
+    sub     rdi, DOUBLE_EXP_BIAS
 
 ; Извлекаем мантиссу
     mov     rsi, r15
-    mov     rcx, 0x000FFFFFFFFFFFFF
+    mov     rcx, DOUBLE_MANT_MASK
     and     rsi, rcx
 ; Добавляем ведущую единицу к мантиссе
-    mov     rcx, 0x0010000000000000
+    mov     rcx, DOUBLE_MANT_IMAGINARY_1_MASK
     or      rsi, rcx
 
     cmp     rdi, -1023
@@ -900,14 +941,14 @@ ftoa:
 ; Экспонента денормализованного числа равна -1022
     inc     rdi
 ; Обнуляем ведущую единицу у денормализованного числа
-    mov     rcx, 0x0010000000000000
+    mov     rcx, DOUBLE_MANT_IMAGINARY_1_MASK
     xor     rsi, rcx
 
 .skip_denormalized_case:
 ; Выравниваем мантиссу по левому краю 
     shl     rsi, 11
 
-; Храним в регистре rdx сдвиг 
+; Храним в регистре rdx сдвиг (63 - exp)
     mov     rdx, 63
     sub     rdx, rdi
 
@@ -997,7 +1038,7 @@ ftoa:
     shr     rdi, cl
 
 ; Кладем в буфер целую часть числа
-    mov     rsi, 10
+    mov     rsi, DECIMAL_BASE
     mov     rdx, r13
     mov     rcx, r14
     call    itoa
@@ -1036,6 +1077,11 @@ ftoa:
 ;       rax, rcx, rdx
 ; -----------------------------------------------------------------------------
 .get_decimal_power:
+; Для получения десятичной степени нужно провести следующую операцию:
+; 10_pow = 2_pow * log_10{2} = 2_pow * 0,30103
+; Умножение на такое число можно реализовать как умножение на 
+; 2^16 * 0,30103 / 2^16 = 19728 / 2^16, т.е
+; 10_pow = (2_pow * 19728) >> 16
     xor     edx, edx
     mov     rax, rdi 
     mov     rcx, 19728
@@ -1065,7 +1111,7 @@ ftoa:
 .fraction_handler:
     xor     edx, edx
     mov     rax, rsi
-    mov     rcx, 10
+    mov     rcx, DECIMAL_BASE
     mul     rcx
 
     lea     rcx, [rel digits]
@@ -1113,7 +1159,7 @@ ftoa:
 
 .handle_exceptions:
     mov     rdi, r15
-    mov     rcx, 0x000FFFFFFFFFFFFF
+    mov     rcx, DOUBLE_MANT_MASK
     and     rdi, rcx
     test    rdi, rdi
     je      .handle_inf
